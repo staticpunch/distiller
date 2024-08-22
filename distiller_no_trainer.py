@@ -87,13 +87,13 @@ def is_identical(t1, t2):
 @dataclass
 class Args:
     weight_decay: float = 0.0
-    learning_rate: float = 2e-4
+    learning_rate: float = 2e-5
     preprocessing_num_workers: int = 32
     per_device_train_batch_size: int = 1
     per_device_eval_batch_size: int = 16
-    teacher_name: str = "../model_hub/phi-2/"
-    student_name: str = "../model_hub/phi-half/"
-    block_size: int = 256
+    teacher_name: str = "Qwen/Qwen2-1.5B"
+    student_name: str = "nguyenthanhdo/Qwen2-1.5B-tierce"
+    block_size: int = 512
     lr_scheduler_type: str = "cosine"
     gradient_accumulation_steps: int = 16
     max_train_steps: int = None
@@ -258,8 +258,8 @@ class Distiller(nn.Module):
         train_dataset: datasets.Dataset = None,
         eval_dataset: datasets.Dataset = None,
         temperature: float = 2.0,
-        alpha_ce: float = 0.67,
-        alpha_clm: float = 0.33,
+        alpha_ce: float = 0.7,
+        alpha_clm: float = 0.3,
         args: Args = None
     ):
         super().__init__()
@@ -368,20 +368,31 @@ class Distiller(nn.Module):
         teacher_outputs,
     ):
         ## format
-        s_logits, s_hidden_states = (student_outputs["logits"], student_outputs["hidden_states"])
-        t_logits, t_hidden_states = (teacher_outputs["logits"], teacher_outputs["hidden_states"])
+        s_logits, s_hidden_states = (
+            student_outputs["logits"], 
+            student_outputs["hidden_states"]
+        )
+        t_logits, t_hidden_states = (
+            teacher_outputs["logits"], 
+            teacher_outputs["hidden_states"]
+        )
         assert s_logits.size() == t_logits.size()
         s_logits = s_logits.view(-1, s_logits.size(-1))
         t_logits = t_logits.view(-1, t_logits.size(-1))
 
+        total_loss, loss_clm, loss_ce = 0, 0, 0
         ## clm loss
-        loss_clm = student_outputs.loss
+        if self.alpha_clm > 0:
+            loss_clm = student_outputs.loss
+            total_loss += loss_clm
         
         ## logits loss.
-        loss_ce = kl_torch(s_logits, t_logits, temperature=self.temperature)
-
+        if self.alpha_ce > 0:
+            loss_ce = kl_torch(s_logits, t_logits, temperature=self.temperature)
+            total_loss += loss_ce
+            
         ## total loss
-        total_loss = self.alpha_ce * loss_ce + self.alpha_clm * loss_clm
+        # total_loss = self.alpha_ce * loss_ce + self.alpha_clm * loss_clm
         return dict(
             loss_clm=loss_clm,
             loss_ce=loss_ce,
@@ -440,9 +451,8 @@ class Distiller(nn.Module):
         completed_steps = 0
         starting_epoch = 0
         progress_bar.update(completed_steps)
-
         """
-        LET'S GO.
+        Let's go get some drinks!
         """
         for epoch in range(starting_epoch, args.num_train_epochs):
             self.pair.student.train()
@@ -461,10 +471,11 @@ class Distiller(nn.Module):
                 if accelerator.sync_gradients:
                     # logger.info(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
                     # logger.info(f"GPU memory cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
-                    loss_message = "Train loss: "
+                    loss_message = []
                     for k, v in losses.items():
-                        loss_message += f"{k}: {v} || "
-                    logger.info(f"Train loss: {loss_message}")
+                        loss = "{:.2f}".format(v)
+                        loss_message += [f" {k}: {loss} "]
+                    logger.info(f"Train loss: {'||'.join(loss_message)}")
                     progress_bar.update(1)
                     completed_steps += 1
 
@@ -479,8 +490,8 @@ class Distiller(nn.Module):
                 #     break
         
             # EVAL
-            eval_loss, perplexity = self.eval()
-            logger.info(f"epoch {epoch}: perplexity: {perplexity} eval_loss: {eval_loss}")
+            # eval_loss, perplexity = self.eval()
+            # logger.info(f"epoch {epoch}: perplexity: {perplexity} eval_loss: {eval_loss}")
         
             # SAVE CHECKPOINTS
             if args.checkpointing_steps == "epoch":

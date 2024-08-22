@@ -93,12 +93,12 @@ class Args:
     per_device_eval_batch_size: int = 16
     teacher_name: str = "Qwen/Qwen2-1.5B"
     student_name: str = "nguyenthanhdo/Qwen2-1.5B-tierce"
-    block_size: int = 512
+    block_size: int = 1024
     lr_scheduler_type: str = "cosine"
     gradient_accumulation_steps: int = 16
     max_train_steps: int = None
-    num_train_epochs: int = 3
-    num_warmup_steps: int = 0
+    num_train_epochs: int = 2
+    num_warmup_steps: int = 50
     checkpointing_steps: str = "epoch"
     data_dir: str = "../data/c4"
     train_file: str = "sample.jsonl"
@@ -326,15 +326,7 @@ class Distiller(nn.Module):
         )
 
         # HEHE
-        (self.pair,
-         # self.student, 
-         # self.teacher, 
-         self.optimizer, 
-         self.train_dataloader, 
-         self.eval_dataloader, 
-         self.scheduler) = accelerator.prepare(
-            # self.student, 
-            # self.teacher, 
+        self.pair, self.optimizer, self.train_dataloader, self.eval_dataloader, self.scheduler = accelerator.prepare(
             self.pair,
             self.optimizer, 
             self.train_dataloader, 
@@ -353,11 +345,6 @@ class Distiller(nn.Module):
     def forward(self, batch):
         student_outputs = self.pair.student(**batch, output_hidden_states=True)
         with torch.no_grad():
-            # teacher_outputs = self.teacher(
-            #     **{k: v.to(self.teacher_device) for k, v in batch.items()},
-            #     output_hidden_states=True
-            # )
-            # torch.cuda.empty_cache()
             teacher_outputs = self.pair.teacher(**batch, output_hidden_states=True)
             # torch.cuda.empty_cache()
         return student_outputs, teacher_outputs
@@ -471,23 +458,30 @@ class Distiller(nn.Module):
                 if accelerator.sync_gradients:
                     # logger.info(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
                     # logger.info(f"GPU memory cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
-                    loss_message = []
-                    for k, v in losses.items():
-                        loss = "{:.2f}".format(v)
-                        loss_message += [f" {k}: {loss} "]
-                    logger.info(f"Train loss: {'||'.join(loss_message)}")
                     progress_bar.update(1)
                     completed_steps += 1
 
-                # # Step checking.
-                # if isinstance(checkpointing_steps, int):
-                #     if completed_steps % checkpointing_steps == 0:
-                #         output_dir = f"step_{completed_steps}"
-                #         if args.output_dir is not None:
-                #             output_dir = os.path.join(args.output_dir, output_dir)
-                #         accelerator.save_state(output_dir)
-                # if completed_steps >= args.max_train_steps:
-                #     break
+                if step % (self.args.gradient_accumulation_steps * 5) == 0:
+                    current_lr = self.scheduler.get_last_lr()[0]  # Get the current learning rate
+                    lr_message = f"Current LR: {current_lr:.6f} || "
+                    loss_message = []
+                    for k, v in losses.items():
+                        loss = "{:.6f}".format(v)
+                        loss_message += [f" {k}: {loss} "]
+                    loss_message = f"Train loss: {'||'.join(loss_message)}"
+                    log_message = lr_message + loss_message
+                    tqdm.write(log_message)
+
+                
+                # Step checking.
+                if isinstance(args.checkpointing_steps, int):
+                    if completed_steps % args.checkpointing_steps == 0:
+                        output_dir = f"step_{completed_steps}"
+                        if args.output_dir is not None:
+                            output_dir = os.path.join(args.output_dir, output_dir)
+                        accelerator.save_state(output_dir)
+                if completed_steps >= args.max_train_steps:
+                    break
         
             # EVAL
             # eval_loss, perplexity = self.eval()

@@ -91,9 +91,9 @@ class Args:
     preprocessing_num_workers: int = 32
     per_device_train_batch_size: int = 1
     per_device_eval_batch_size: int = 16
-    teacher_name: str = "../model_hub/phi-half/"
+    teacher_name: str = "../model_hub/phi-2/"
     student_name: str = "../model_hub/phi-half/"
-    block_size: int = 512
+    block_size: int = 256
     lr_scheduler_type: str = "cosine"
     gradient_accumulation_steps: int = 16
     max_train_steps: int = None
@@ -359,7 +359,7 @@ class Distiller(nn.Module):
             # )
             # torch.cuda.empty_cache()
             teacher_outputs = self.pair.teacher(**batch, output_hidden_states=True)
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
         return student_outputs, teacher_outputs
 
     def compute_loss(
@@ -382,7 +382,11 @@ class Distiller(nn.Module):
 
         ## total loss
         total_loss = self.alpha_ce * loss_ce + self.alpha_clm * loss_clm
-        return total_loss
+        return dict(
+            loss_clm=loss_clm,
+            loss_ce=loss_ce,
+            total_loss=total_loss
+        )
         
     def optimize(self, loss):
         accelerator.backward(loss)
@@ -420,7 +424,7 @@ class Distiller(nn.Module):
             args.gradient_accumulation_steps
         )
         
-        logger.info("***** Running training *****")
+        logger.info(f"***** Running training *****")
         logger.info(f"  Num examples = {len(self.train_dataset)}")
         logger.info(f"  Num Epochs = {args.num_train_epochs}")
         logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
@@ -429,6 +433,7 @@ class Distiller(nn.Module):
         logger.info(f"  Total optimization steps = {args.max_train_steps}")
         
     def train(self):
+        self.begin_training_log()
         args = self.args
         # Only show the progress bar once on each machine.
         progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
@@ -445,19 +450,23 @@ class Distiller(nn.Module):
             active_dataloader = self.train_dataloader
             for step, batch in enumerate(active_dataloader):
                 # Main training loop
-                logger.info(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-                logger.info(f"GPU memory cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
                 with accelerator.accumulate(self.pair.student):
                     student_outputs, teacher_outputs = self.forward(batch)
-                    loss = self.compute_loss(student_outputs, teacher_outputs)
-                    self.optimize(loss)
-                logger.info(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-                logger.info(f"GPU memory cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+                    # logger.info(f"student_outputs: {student_outputs.logits.requires_grad}")
+                    # logger.info(f"teacher_outputs: {teacher_outputs.logits.requires_grad}")
+                    losses = self.compute_loss(student_outputs, teacher_outputs)
+                    self.optimize(losses["total_loss"])
+
                 # Checks if the accelerator has performed an optimization step behind the scenes
                 if accelerator.sync_gradients:
+                    # logger.info(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+                    # logger.info(f"GPU memory cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+                    loss_message = "Train loss: "
+                    for k, v in losses.items():
+                        loss_message += f"{k}: {v} || "
+                    logger.info(f"Train loss: {loss_message}")
                     progress_bar.update(1)
                     completed_steps += 1
-                    logger.info(f"train loss: {loss}.")
 
                 # # Step checking.
                 # if isinstance(checkpointing_steps, int):
